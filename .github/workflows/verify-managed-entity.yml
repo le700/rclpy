@@ -1,0 +1,38 @@
+name: Verify managed entity repair against baseline
+on:
+  push:
+    branches: [verify-managed-entity-types]
+permissions:
+  contents: read
+jobs:
+  build-test:
+    name: ${{ matrix.revision }} rolling build and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - revision: upstream-baseline
+            sha: cd221d7408ea164b739d70408acc989eb83d6750
+          - revision: repaired-pr
+            sha: dcfd167e0efebd342868ef794ae65754a5f4e307
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - name: Verify exact source
+        env:
+          EXPECTED_SHA: ${{ matrix.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Build and test in ROS rolling
+        uses: ros-industrial/industrial_ci@master
+        env:
+          ROS_DISTRO: rolling
+          ROS_REPO: testing
+          OS_CODE_NAME: resolute
+          DOCKER_IMAGE: ghcr.io/ros-controls/ros:rolling-ubuntu-testing
+          RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+          ADDITIONAL_DEBS: python3-types-pyyaml
