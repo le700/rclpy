@@ -1,0 +1,98 @@
+name: Verify integrated upstream async deadlock repair
+on:
+  push:
+    branches: [repair-async-deadlock-integration]
+permissions:
+  contents: read
+jobs:
+  verify:
+    name: ${{ matrix.revision }} / ${{ matrix.rmw }} full tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    container:
+      image: ghcr.io/ros-controls/ros:rolling-ubuntu-testing
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - revision: integrated-repair
+            sha: 5e7f86547ee5cbeba6e4e698e8a9f6599944f71c
+            rmw: rmw_cyclonedds_cpp
+          - revision: integrated-repair
+            sha: 5e7f86547ee5cbeba6e4e698e8a9f6599944f71c
+            rmw: rmw_fastrtps_cpp
+    defaults:
+      run:
+        shell: bash
+    env:
+      RMW_IMPLEMENTATION: ${{ matrix.rmw }}
+      PYTHONFAULTHANDLER: '1'
+      PYTEST_ADDOPTS: '-vv -o faulthandler_timeout=20'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - name: Install exact verification environment
+        run: |
+          git config --global --add safe.directory "$PWD"
+          apt-get update -qq
+          apt-get install -y gdb procps python3-types-pyyaml python3-colcon-common-extensions ros-rolling-rmw-fastrtps-cpp ros-rolling-rmw-cyclonedds-cpp
+          source /opt/ros/rolling/setup.bash
+          rosdep update --rosdistro rolling
+          rosdep install --from-paths rclpy --ignore-src -r -y --rosdistro rolling
+      - name: Build exact source with diagnostic symbols
+        env:
+          EXPECTED_SHA: ${{ matrix.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          source /opt/ros/rolling/setup.bash
+          colcon build --packages-select rclpy --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Assert actual middleware and execute full package tests
+        run: |
+          source /opt/ros/rolling/setup.bash
+          source install/setup.bash
+          python3 -c 'import os; from rclpy.utilities import get_rmw_implementation_identifier; actual=get_rmw_implementation_identifier(); print("Actual RMW:", actual); assert actual == os.environ["RMW_IMPLEMENTATION"]'
+          python3 -c 'import sys; print(sys.version); assert sys.version_info >= (3, 12)'
+          registered=$(ctest --test-dir build/rclpy -N)
+          for suite in test_async_node test_async_subscription test_async_service test_async_client; do
+            echo "$registered" | grep -E ": ${suite}$"
+          done
+          mkdir -p diagnosis
+          colcon test --packages-select rclpy --return-code-on-test-failure --event-handlers console_direct+ --ctest-args -V > diagnosis/full-tests.log 2>&1 &
+          test_job_pid=$!
+          (
+            while kill -0 "$test_job_pid" 2>/dev/null; do
+              python_pid=$(pgrep -f '^/usr/bin/python3 -u -m pytest .*test_async_' | head -1 || true)
+              if [ -n "$python_pid" ]; then
+                sleep 20
+                if kill -0 "$python_pid" 2>/dev/null; then
+                  timeout 10s gdb --batch -ex 'set pagination off' -ex 'thread apply all bt' -p "$python_pid" > "diagnosis/native-$python_pid.log" 2>&1 || true
+                fi
+              fi
+              sleep 3
+            done
+          ) &
+          observer_pid=$!
+          set +e
+          wait "$test_job_pid"
+          result=$?
+          kill "$observer_pid" 2>/dev/null || true
+          wait "$observer_pid" 2>/dev/null || true
+          set -e
+          cat diagnosis/full-tests.log
+          exit "$result"
+      - name: Validate all recorded test results
+        if: always()
+        run: colcon test-result --verbose
+      - name: Save complete result and stack evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rclpy-${{ matrix.revision }}-${{ matrix.rmw }}
+          path: |
+            diagnosis/
+            build/rclpy/test_results/
