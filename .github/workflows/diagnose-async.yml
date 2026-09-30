@@ -1,0 +1,71 @@
+name: Diagnose async blocking with Python and native stacks
+on:
+  push:
+    branches: [verify-async-deadlock-traces]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    container:
+      image: ghcr.io/ros-controls/ros:rolling-ubuntu-testing
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    defaults:
+      run:
+        shell: bash
+    env:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      PYTHONFAULTHANDLER: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dcfd167e0efebd342868ef794ae65754a5f4e307
+          persist-credentials: false
+      - name: Install diagnosis and package dependencies
+        run: |
+          git config --global --add safe.directory "$PWD"
+          apt-get update -qq
+          apt-get install -y gdb procps python3-types-pyyaml python3-colcon-common-extensions
+          source /opt/ros/rolling/setup.bash
+          rosdep update --rosdistro rolling
+          rosdep install --from-paths rclpy --ignore-src -r -y --rosdistro rolling
+      - name: Build exact repaired source with debug symbols
+        run: |
+          source /opt/ros/rolling/setup.bash
+          colcon build --packages-select rclpy --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Collect isolated failing tests and thread stacks
+        run: |
+          source /opt/ros/rolling/setup.bash
+          source install/setup.bash
+          mkdir -p diagnosis
+          ulimit -c 0
+          cases=(
+            'test_async_node.py::test_lifecycle'
+            'test_async_subscription.py::test_subscription_receives_message'
+            'test_async_service.py::test_service_concurrent_dispatch'
+            'test_async_client.py::test_client_calls_async_service'
+          )
+          for case in "${cases[@]}"; do
+            label="${case%%::*}"
+            timeout --signal=ABRT --kill-after=10s 45s python3 -m pytest -vv -s "rclpy/test/$case" -o faulthandler_timeout=15 > "diagnosis/$label.log" 2>&1 &
+            watchdog_pid=$!
+            sleep 20
+            python_pid=$(pgrep -P "$watchdog_pid" -f 'python3 -m pytest' || true)
+            if [ -n "$python_pid" ]; then
+              timeout 15s gdb --batch -ex 'set pagination off' -ex 'thread apply all bt' -p "$python_pid" > "diagnosis/$label.native.log" 2>&1 || true
+            fi
+            set +e
+            wait "$watchdog_pid"
+            result=$?
+            set -e
+            echo "$case exit=$result"
+            cat "diagnosis/$label.log"
+            if [ -f "diagnosis/$label.native.log" ]; then cat "diagnosis/$label.native.log"; fi
+          done
+      - name: Preserve complete diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: async-deadlock-diagnosis
+          path: diagnosis/
