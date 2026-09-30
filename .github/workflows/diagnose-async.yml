@@ -38,6 +38,8 @@ jobs:
         run: |
           source /opt/ros/rolling/setup.bash
           source install/setup.bash
+          export PYTHONPATH="$PWD/build/rclpy:${PYTHONPATH:-}"
+          python3 -c 'from rclpy.utilities import get_rmw_implementation_identifier; print("Actual RMW:", get_rmw_implementation_identifier())'
           mkdir -p diagnosis
           ulimit -c 0
           cases=(
