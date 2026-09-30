@@ -26,7 +26,7 @@ jobs:
         run: |
           git config --global --add safe.directory "$PWD"
           apt-get update -qq
-          apt-get install -y gdb procps python3-types-pyyaml python3-colcon-common-extensions
+          apt-get install -y gdb procps python3-types-pyyaml python3-colcon-common-extensions ros-rolling-rmw-fastrtps-cpp
           source /opt/ros/rolling/setup.bash
           rosdep update --rosdistro rolling
           rosdep install --from-paths rclpy --ignore-src -r -y --rosdistro rolling
